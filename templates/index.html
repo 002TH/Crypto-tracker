@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Crypto Breadth Tracker</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="refresh" content="5">
+    <style>
+        body {
+            font-family: monospace;
+            background-color: black;
+            color: white;
+            text-align: center;
+            padding: 30px;
+        }
+        .green { color: lime; }
+        .red { color: red; }
+        input[type="text"] {
+            width: 80%;
+            padding: 8px;
+            font-size: 16px;
+            margin-top: 10px;
+        }
+        button {
+            padding: 8px 16px;
+            font-size: 16px;
+            margin-top: 10px;
+            cursor: pointer;
+        }
+        .box {
+            border: 1px solid gray;
+            padding: 20px;
+            margin: 15px auto;
+            max-width: 500px;
+            background-color: #111;
+            border-radius: 8px;
+        }
+    </style>
+</head>
+<body>
+    <h1>📊 Crypto Breadth Tracker (Nigerian Time)</h1>
+
+    <div class="box">
+        <h2>Delta Ratio: <span class="{{ delta_color }}">{{ delta_ratio }}</span></h2>
+        <h2>ADD: <span class="{{ 'green' if add_counter > 0 else 'red' }}">{{ add_counter }}</span></h2>
+        <h2>TICK: <span class="{{ 'green' if tick_counter > 0 else 'red' }}">{{ tick_counter }} {{ tick_arrow }}</span></h2>
+        <p><strong>{{ now }}</strong></p>
+    </div>
+
+    <div class="box">
+        <h3>Edit Coin List for ADD/TICK:</h3>
+        <form method="POST">
+            <input type="text" name="coin_list" value="{{ coin_list }}" placeholder="e.g. BTCUSDT, ETHUSDT, SOLUSDT" />
+            <br>
+            <button type="submit">Update Coins</button>
+        </form>
+    </div>
+</body>
+</html>
