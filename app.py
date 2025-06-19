@@ -1,148 +1,135 @@
-from flask import Flask, render_template_string
-import requests
-import threading
-import time
-from datetime import datetime, timedelta
+from flask import Flask, render_template, request, jsonify
+import threading, json, time
+from datetime import datetime
 import pytz
+from websocket import create_connection
+import requests
 
 app = Flask(__name__)
-
-# === SETTINGS ===
-COINS = ["SOLUSDT", "BTCUSDT", "ETHUSDT"]
-MAIN_COIN = "SOLUSDT"
 NIGERIA_TZ = pytz.timezone("Africa/Lagos")
+COINS = ["SOLUSDT", "BTCUSDT", "ETHUSDT"]
 
-buy_volume = 0
-sell_volume = 0
-add_counter = 0
+# === STATE ===
+coin_data = {
+    symbol: {
+        "buy_volume": 0.0,
+        "sell_volume": 0.0,
+        "price": 0.0,
+        "prev_close": 0.0,
+        "last_tick": 0.0
+    } for symbol in COINS
+}
+
+tick_arrow = "→"
 tick_counter = 0
-tick_cache = {coin: 0 for coin in COINS}
-last_tick_arrow = "→"
-last_15m_check = datetime.utcnow()
+add_counter = 0
 
-# === API FETCH FUNCTIONS ===
-def get_price(symbol):
-    r = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}").json()
-    return float(r["price"])
-
+# === HELPER FUNCTIONS ===
 def get_prev_close(symbol):
-    r = requests.get(f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1d&limit=2").json()
-    return float(r[-2][4])
+    try:
+        r = requests.get(f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1d&limit=2").json()
+        return float(r[-2][4])
+    except:
+        return 0.0
 
-def get_recent_trades(symbol):
-    r = requests.get(f"https://api.binance.com/api/v3/trades?symbol={symbol}&limit=1000").json()
-    return r
+def reset_daily_data():
+    global tick_arrow, tick_counter, add_counter
+    tick_arrow = "→"
+    tick_counter = 0
+    add_counter = 0
+    for coin in coin_data:
+        coin_data[coin]["buy_volume"] = 0
+        coin_data[coin]["sell_volume"] = 0
+        coin_data[coin]["prev_close"] = get_prev_close(coin)
 
-def reset_volumes():
-    global buy_volume, sell_volume
-    buy_volume = 0
-    sell_volume = 0
-
-# === BACKGROUND WORKER ===
-def background_worker():
-    global buy_volume, sell_volume, add_counter, tick_counter, last_tick_arrow, last_15m_check
+# === BACKGROUND THREAD ===
+def ws_worker():
+    global tick_arrow, tick_counter, add_counter
+    stream_url = f"wss://stream.binance.com:9443/stream?streams={'/'.join([s.lower() + '@trade' for s in COINS])}"
+    ws = create_connection(stream_url)
+    last_reset_day = datetime.now(NIGERIA_TZ).day
 
     while True:
         now = datetime.now(NIGERIA_TZ)
+        if now.day != last_reset_day:
+            reset_daily_data()
+            last_reset_day = now.day
 
-        if now.hour == 0 and now.minute == 0 and now.second < 5:
-            reset_volumes()
+        try:
+            msg = json.loads(ws.recv())
+            data = msg['data']
+            symbol = data['s']
+            qty = float(data['q'])
+            price = float(data['p'])
+            is_buyer_maker = data['m']
 
-        add_counter = 0
-        tick_counter = 0
+            if is_buyer_maker:
+                coin_data[symbol]["sell_volume"] += qty
+            else:
+                coin_data[symbol]["buy_volume"] += qty
 
-        for coin in COINS:
-            try:
-                trades = get_recent_trades(coin)
-                for trade in trades:
-                    qty = float(trade["qty"])
-                    if trade["isBuyerMaker"]:
-                        sell_volume += qty
-                    else:
-                        buy_volume += qty
+            coin_data[symbol]["price"] = price
 
-                price = get_price(coin)
-                prev_close = get_prev_close(coin)
+            # ADD Logic
+            if price > coin_data[symbol]["prev_close"]:
+                add_counter += 1
+            else:
+                add_counter -= 1
 
-                # ADD
-                if price > prev_close:
-                    add_counter += 1
-                else:
-                    add_counter -= 1
-
-                # TICK
-                if price > tick_cache[coin]:
+            # TICK Logic
+            if coin_data[symbol]["last_tick"] != 0:
+                if price > coin_data[symbol]["last_tick"]:
                     tick_counter += 1
-                elif price < tick_cache[coin]:
+                elif price < coin_data[symbol]["last_tick"]:
                     tick_counter -= 1
-                tick_cache[coin] = price
+            coin_data[symbol]["last_tick"] = price
 
+            # Tick arrow logic every 15 mins
+            if now.minute % 15 == 0 and now.second < 3:
+                if tick_counter > 0:
+                    tick_arrow = "↑"
+                elif tick_counter < 0:
+                    tick_arrow = "↓"
+                else:
+                    tick_arrow = "→"
+
+        except Exception as e:
+            print("WebSocket error:", e)
+            time.sleep(5)
+            try:
+                ws = create_connection(stream_url)
             except:
                 continue
 
-        # TICK ARROW EVERY 15 MINUTES
-        if datetime.utcnow() - last_15m_check >= timedelta(minutes=15):
-            last_15m_check = datetime.utcnow()
-            if tick_counter > 0:
-                last_tick_arrow = "↑"
-            elif tick_counter < 0:
-                last_tick_arrow = "↓"
-            else:
-                last_tick_arrow = "→"
-
-        time.sleep(3)
-
-# === START BACKGROUND THREAD ===
-threading.Thread(target=background_worker, daemon=True).start()
-
-# === ROUTES ===
+# === API ROUTES ===
 @app.route("/")
 def index():
-    current_price = get_price(MAIN_COIN)
-    prev_close = get_prev_close(MAIN_COIN)
+    return render_template("index.html")
 
-    # Delta ratio display format
-    if buy_volume > sell_volume and sell_volume > 0:
-        delta_ratio = f"+{round(buy_volume / sell_volume, 2)}:1"
-    elif sell_volume > buy_volume and buy_volume > 0:
-        delta_ratio = f"-{round(sell_volume / buy_volume, 2)}:1"
-    else:
-        delta_ratio = "1:1"
+@app.route("/data")
+def get_data():
+    total_buy = sum(coin_data[c]["buy_volume"] for c in COINS)
+    total_sell = sum(coin_data[c]["sell_volume"] for c in COINS)
+    delta_ratio = (total_buy / total_sell) if total_sell else total_buy
+    ratio_str = f"+{round(delta_ratio, 2)}:1" if total_buy > total_sell else f"-{round(delta_ratio, 2)}:1"
 
-    # Color based on price vs yesterday close
-    delta_color = "green" if current_price > prev_close else "red"
+    reference_coin = COINS[0]
+    ref_price = coin_data[reference_coin]["price"]
+    ref_close = coin_data[reference_coin]["prev_close"]
+    delta_color = "green" if ref_price > ref_close else "red"
 
-    return render_template_string("""
-    <html>
-    <head>
-        <title>Crypto Tracker</title>
-        <meta http-equiv="refresh" content="5" />
-        <style>
-            body { font-family: monospace; background: black; color: white; text-align: center; padding-top: 50px; }
-            .green { color: lime; }
-            .red { color: red; }
-        </style>
-    </head>
-    <body>
-        <h1>Crypto Breadth Tracker (Nigerian Time)</h1>
-        <h2>Delta Ratio ({{ main_coin }}): <span class="{{ delta_color }}">{{ delta_ratio }}</span></h2>
-        <h2>ADD: <span class="{{ add_color }}">{{ add_counter }}</span></h2>
-        <h2>TICK: <span class="{{ tick_color }}">{{ tick_counter }} {{ tick_arrow }}</span></h2>
-        <p>{{ now }}</p>
-    </body>
-    </html>
-    """, 
-    delta_ratio=delta_ratio,
-    delta_color=delta_color,
-    main_coin=MAIN_COIN,
-    add_counter=add_counter,
-    add_color="green" if add_counter > 0 else "red",
-    tick_counter=tick_counter,
-    tick_arrow=last_tick_arrow,
-    tick_color="green" if tick_counter > 0 else "red",
-    now=datetime.now(NIGERIA_TZ).strftime('%Y-%m-%d %H:%M:%S'))
+    return jsonify({
+        "delta_ratio": ratio_str,
+        "delta_color": delta_color,
+        "add": add_counter,
+        "tick": tick_counter,
+        "tick_arrow": tick_arrow,
+        "time": datetime.now(NIGERIA_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    })
 
-# === RUN ON RENDER.COM ===
+# === START THREAD ===
+threading.Thread(target=ws_worker, daemon=True).start()
+
 if __name__ == "__main__":
     import os
     port = int(os.environ.get("PORT", 5000))
