@@ -1,5 +1,4 @@
 flask
-requests
-gunicorn
-pytz
 websocket-client
+requests
+pytz
